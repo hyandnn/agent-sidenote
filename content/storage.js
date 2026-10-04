@@ -1,6 +1,5 @@
 (function () {
   const SETTINGS_KEY = "cgia_standalone_settings";
-  const NOTES_KEY = "cgia_standalone_notes";
 
   const DEFAULT_SETTINGS = {
     mode: "mock",
@@ -31,28 +30,29 @@
   }
 
   function safeGet(key) {
-    return new Promise((resolve) => {
-      if (!isContextValid()) return resolve(null);
+    return new Promise((resolve, reject) => {
+      if (!isContextValid()) return reject(new Error("扩展上下文已失效，请刷新页面。"));
       try {
         chrome.storage.local.get(key, (result) => {
-          if (chrome.runtime.lastError) return resolve(null);
+          if (chrome.runtime.lastError) return reject(new Error(chrome.runtime.lastError.message));
           resolve(result);
         });
       } catch (e) {
-        resolve(null);
+        reject(e);
       }
     });
   }
 
   function safeSet(obj) {
-    return new Promise((resolve) => {
-      if (!isContextValid()) return resolve(false);
+    return new Promise((resolve, reject) => {
+      if (!isContextValid()) return reject(new Error("扩展上下文已失效，请刷新页面。"));
       try {
         chrome.storage.local.set(obj, () => {
-          resolve(!chrome.runtime.lastError);
+          if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
+          else resolve();
         });
       } catch (e) {
-        resolve(false);
+        reject(e);
       }
     });
   }
@@ -85,21 +85,11 @@
   }
 
   async function loadNotesForPage(pageUrl) {
-    const result = await safeGet(NOTES_KEY);
-    if (!result) return [];
-    const all = result[NOTES_KEY] || {};
-    return Object.values(all)
-      .filter((n) => n.pageUrl === pageUrl)
-      .map((n) => window.CGIANoteSchema?.normalizeNote(n, cachedSettings) || n);
+    return window.CGIANoteClient.listNotes(pageUrl);
   }
 
   async function loadAllNotes() {
-    const result = await safeGet(NOTES_KEY);
-    if (!result) return [];
-    const all = result[NOTES_KEY] || {};
-    return Object.values(all).map(
-      (n) => window.CGIANoteSchema?.normalizeNote(n, cachedSettings) || n
-    );
+    return window.CGIANoteClient.listNotes();
   }
 
   async function countNotes(filter = {}) {
@@ -112,18 +102,7 @@
   }
 
   async function saveNote(note) {
-    const normalized = window.CGIANoteSchema?.normalizeNote(note, cachedSettings) || note;
-    const result = await safeGet(NOTES_KEY);
-    const all = (result && result[NOTES_KEY]) || {};
-    all[normalized.noteId] = normalized;
-    await safeSet({ [NOTES_KEY]: all });
-  }
-
-  async function deleteNote(noteId) {
-    const result = await safeGet(NOTES_KEY);
-    const all = (result && result[NOTES_KEY]) || {};
-    delete all[noteId];
-    await safeSet({ [NOTES_KEY]: all });
+    return window.CGIANoteClient.saveNote(note);
   }
 
   window.CGIAStorage = {
@@ -133,7 +112,6 @@
     loadNotesForPage,
     loadAllNotes,
     countNotes,
-    saveNote,
-    deleteNote
+    saveNote
   };
 })();

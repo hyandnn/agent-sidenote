@@ -1,4 +1,6 @@
 importScripts(
+  "../shared/note_schema.js",
+  "note_store.js",
   "prompt_builder.js",
   "llm_client.js",
   "stream_mock.js",
@@ -38,7 +40,7 @@ function mockAnswer(req) {
   );
 }
 
-async function streamAsk(payload, settingsOverride, emit) {
+async function streamAsk(payload, settingsOverride, emit, signal) {
   if (!payload.userQuestion?.trim()) {
     throw new Error("问题不能为空。");
   }
@@ -50,14 +52,16 @@ async function streamAsk(payload, settingsOverride, emit) {
 
   if (settings.mode === "mock") {
     const answer = mockAnswer(payload);
-    await simulateStream(answer, (delta, full) => emit({ type: "chunk", delta, full }));
+    await simulateStream(answer, (delta, full) => emit({ type: "chunk", delta, full }), 4, 18, signal);
     return answer;
   }
 
-  const prompt = buildPrompt(payload);
-  return askModelStream(prompt, settings, (delta, full) =>
-    emit({ type: "chunk", delta, full })
-  );
+  const prompt = buildPrompt({
+    ...payload,
+    fullMessageText: settings.includeFullMessage === false ? "" : payload.fullMessageText,
+    mainConversation: settings.includeMainConversation === false ? [] : payload.mainConversation
+  });
+  return askModelStream(prompt, settings, (delta, full) => emit({ type: "chunk", delta, full }), signal);
 }
 
 async function handleAsk(payload, settingsOverride) {
@@ -100,12 +104,15 @@ async function handleDownloadMd(files, settingsOverride) {
   const exportDir = resolveMdExportDir(settings);
   const filenames = [];
 
-  for (const file of files) {
-    if (!file?.content || !file?.filename) {
-      throw new Error("导出文件格式无效。");
+  try {
+    for (const file of files) {
+      if (!file?.content || !file?.filename) throw new Error("导出文件格式无效。");
+      await downloadMarkdownContent(file.content, file.filename, exportDir);
+      if (file.receiptKey && file.contentHash) await CGIANoteStore.markExported(file.receiptKey, file.contentHash);
+      filenames.push(file.filename);
     }
-    await downloadMarkdownContent(file.content, file.filename, exportDir);
-    filenames.push(file.filename);
+  } catch (error) {
+    throw new Error(`已完成 ${filenames.length}/${files.length} 个文件。${error.message}`);
   }
 
   return { filenames, count: filenames.length };
@@ -113,33 +120,48 @@ async function handleDownloadMd(files, settingsOverride) {
 
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== "ask-stream") return;
+  let controller;
+  let started = false;
+  const emit = (message) => {
+    try { port.postMessage(message); } catch { controller?.abort(); }
+  };
+  port.onDisconnect.addListener(() => controller?.abort());
 
   port.onMessage.addListener((message) => {
+    if (message.type === "CANCEL") { controller?.abort(); return; }
     if (message.type !== "ASK_STREAM") return;
+    if (started) return;
+    started = true;
+    controller = new AbortController();
 
     (async () => {
       try {
-        const answer = await streamAsk(message.payload, message.settings, (msg) => {
-          try {
-            port.postMessage(msg);
-          } catch (e) {
-            // 端口可能已断开
-          }
-        });
-        port.postMessage({
+        const answer = await streamAsk(message.payload, message.settings, emit, controller.signal);
+        emit({
           type: "done",
           noteId: message.payload.noteId,
           answer,
           status: "completed"
         });
       } catch (err) {
-        port.postMessage({ type: "error", error: err.message || String(err) });
+        emit({ type: "error", error: err.message || String(err), partialAnswer: err.partialAnswer, code: err.code || (controller.signal.aborted ? "CANCELLED" : "REQUEST_FAILED") });
       }
     })();
   });
 });
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (!message || typeof message !== "object") return false;
+  const storeActions = {
+    NOTES_LIST: async () => ({ notes: await CGIANoteStore.listNotes(message.pageUrl) }),
+    NOTE_SAVE: async () => ({ note: await CGIANoteStore.saveNote(message.note) }),
+    NOTES_RESTORE: async () => ({ count: await CGIANoteStore.restoreNotes(message.pageUrl) }),
+    EXPORT_RECEIPTS: async () => ({ receipts: await CGIANoteStore.getReceipts() })
+  };
+  if (Object.hasOwn(storeActions, message.type)) {
+    storeActions[message.type]().then(sendResponse).catch((error) => sendResponse({ error: error.message || String(error) }));
+    return true;
+  }
   if (message.type === "ASK") {
     handleAsk(message.payload, message.settings)
       .then(sendResponse)

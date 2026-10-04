@@ -1,9 +1,13 @@
 {
   "manifest_version": 3,
   "name": "Agent Sidenote",
-  "version": "1.6.0",
+  "version": "1.6.1",
   "description": "在 AI 对话网页选中文字，用便签旁注追问并导出 Markdown 笔记。支持 ChatGPT、豆包、Gemini。",
-  "permissions": ["storage", "tabs", "downloads"],
+  "permissions": [
+    "storage",
+    "tabs",
+    "downloads"
+  ],
   "host_permissions": [
     "https://chatgpt.com/*",
     "https://chat.openai.com/*",
@@ -26,6 +30,7 @@
       ],
       "js": [
         "shared/note_schema.js",
+        "shared/note_client.js",
         "shared/export.js",
         "content/adapters/shared.js",
         "content/adapters/index.js",
@@ -33,6 +38,7 @@
         "content/adapters/doubao.js",
         "content/adapters/gemini.js",
         "content/marked.min.js",
+        "content/purify.min.js",
         "content/storage.js",
         "content/api_client.js",
         "content/selection.js",
@@ -40,7 +46,9 @@
         "content/route_manager.js",
         "content/content.js"
       ],
-      "css": ["content/content.css"],
+      "css": [
+        "content/content.css"
+      ],
       "run_at": "document_idle"
     }
   ],

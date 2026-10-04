@@ -1,5 +1,6 @@
 (function () {
   const activeNotes = new Map(); // noteId -> { note, el }
+  const noteStates = new WeakMap();
   let topZIndex = 2147483000;
 
   const DEFAULT_SIZE = { width: 380, height: 480 };
@@ -73,17 +74,22 @@
     noteEl.style.width = note.collapsed ? `${Math.round(w * 0.85)}px` : `${w}px`;
   }
 
-  // DOMParser 中转：绕过 chatgpt.com 的 Trusted Types CSP，
-  // 同时对 marked 输出的 HTML 做安全隔离（只取 body 子节点）
+  // Sanitize untrusted model output before importing nodes into the page.
   function markdownToFragment(md) {
     try {
-      const html = typeof marked !== "undefined" ? marked.parse(md) : null;
-      if (!html) throw new Error("marked not available");
-      const doc = new DOMParser().parseFromString(html, "text/html");
-      const frag = document.createDocumentFragment();
-      Array.from(doc.body.childNodes).forEach((node) =>
-        frag.appendChild(document.importNode(node, true))
-      );
+      if (typeof marked === "undefined" || typeof DOMPurify === "undefined") throw new Error("Renderer unavailable");
+      const frag = DOMPurify.sanitize(marked.parse(md), {
+        RETURN_DOM_FRAGMENT: true,
+        ALLOWED_TAGS: ["p", "br", "strong", "em", "del", "blockquote", "pre", "code", "ul", "ol", "li", "h1", "h2", "h3", "h4", "h5", "h6", "hr", "table", "thead", "tbody", "tr", "th", "td", "a"],
+        ALLOWED_ATTR: ["href", "title", "start", "colspan", "rowspan"],
+        ALLOW_DATA_ATTR: false,
+        ALLOW_ARIA_ATTR: false
+      });
+      frag.querySelectorAll("a").forEach((link) => {
+        const href = link.getAttribute("href") || "";
+        if (!/^https?:\/\//i.test(href)) link.removeAttribute("href");
+        else { link.setAttribute("target", "_blank"); link.setAttribute("rel", "noopener noreferrer"); }
+      });
       return frag;
     } catch (e) {
       // 降级：纯文本
@@ -145,7 +151,13 @@
 
   function persistNote(note) {
     note.updatedAt = new Date().toISOString();
-    window.CGIAStorage.saveNote(note);
+    return window.CGIAStorage.saveNote(note);
+  }
+
+  function persistWithFeedback(noteEl, note) {
+    return persistNote(note).catch((error) => {
+      showSaveFeedback(noteEl, error.message, true);
+    });
   }
 
   function showSaveFeedback(noteEl, text, isError = false) {
@@ -153,29 +165,26 @@
     if (!fb) return;
     fb.textContent = text;
     fb.style.color = isError ? "#c0392b" : "#2e7d32";
-    setTimeout(() => {
-      fb.textContent = "";
-    }, 2500);
+    if (!isError) setTimeout(() => { fb.textContent = ""; }, 2500);
   }
 
-  function handleSaveAsNote(noteEl, note) {
-    const contentHash = window.CGIANoteSchema.computeContentHashForNote(note);
-    if (note.lastExportedContentHash && note.lastExportedContentHash === contentHash) {
-      showSaveFeedback(noteEl, "内容与上次导出相同，已跳过");
-      return;
-    }
-
-    const content = window.CGIANoteSchema.noteToMarkdown(note);
-    const filename = window.CGIANoteSchema.markdownOutputFilename(
-      window.CGIANoteSchema.noteToJsonlRecord(note)
-    );
-    window.CGIAExport.downloadMarkdown([{ content, filename }])
-      .then(() => {
-        note.lastExportedContentHash = contentHash;
-        persistNote(note);
-        showSaveFeedback(noteEl, "已保存 Markdown 文件");
-      })
-      .catch((err) => showSaveFeedback(noteEl, err.message, true));
+  async function handleSaveAsNote(noteEl, note) {
+    const button = noteEl.querySelector(".cgia-save-note-btn");
+    if (button.disabled) return;
+    button.disabled = true;
+    try {
+      await persistNote(note);
+      const settings = window.CGIAStorage.getSettingsSync();
+      const check = window.CGIANoteSchema.validateMdExportDir(settings.mdExportDir);
+      if (!check.ok) throw new Error(check.error);
+      const receipts = await window.CGIANoteClient.getReceipts();
+      const plan = window.CGIANoteSchema.prepareMarkdownExport([note], { onlyChanged: true }, receipts, check.dir);
+      if (!plan.files.length) { showSaveFeedback(noteEl, "内容与上次导出相同，已跳过"); return; }
+      await window.CGIAExport.downloadMarkdown(plan.files, { ...settings, mdExportDir: check.dir });
+      showSaveFeedback(noteEl, "已保存 Markdown 文件");
+    } catch (error) {
+      showSaveFeedback(noteEl, error.message, true);
+    } finally { button.disabled = false; }
   }
 
   // chatgpt.com 启用 Trusted Types CSP，innerHTML 赋值会抛 TypeError，
@@ -275,13 +284,19 @@
     const textarea = document.createElement("textarea");
     textarea.className = "cgia-question-input";
     textarea.placeholder = "输入问题…";
+    textarea.value = note.draftQuestion || "";
 
     const sendBtn = document.createElement("button");
     sendBtn.className = "cgia-send-button";
     sendBtn.textContent = "发送";
+    const stopBtn = document.createElement("button");
+    stopBtn.className = "cgia-stop-button";
+    stopBtn.textContent = "停止";
+    stopBtn.hidden = true;
 
     inputRow.appendChild(textarea);
     inputRow.appendChild(sendBtn);
+    inputRow.appendChild(stopBtn);
 
     body.appendChild(meta);
     body.appendChild(quote);
@@ -332,7 +347,13 @@
     const messagesEl = el.querySelector(".cgia-messages");
     (note.messages || []).forEach((m) => {
       if (m.role === "user" || m.role === "assistant") {
-        appendMessage(messagesEl, m.role, m.content);
+        const message = appendMessage(messagesEl, m.role, m.content);
+        if (m.role === "assistant" && m.status && m.status !== "completed") {
+          const status = document.createElement("div");
+          status.className = "cgia-error-msg";
+          status.textContent = m.error || "上次回答未完成，已保留收到的内容。";
+          message.appendChild(status);
+        }
       }
     });
 
@@ -343,7 +364,7 @@
     const typeSelect = noteEl.querySelector(".cgia-note-type");
     typeSelect.addEventListener("change", () => {
       note.noteType = typeSelect.value;
-      persistNote(note);
+      persistWithFeedback(noteEl, note);
     });
 
     noteEl.querySelectorAll(".cgia-mark-btn").forEach((btn) => {
@@ -359,14 +380,14 @@
           note.marks.push(mark);
           btn.classList.add("active");
         }
-        persistNote(note);
+        persistWithFeedback(noteEl, note);
       });
     });
 
     const tagsInput = noteEl.querySelector(".cgia-tags-input");
     const saveTags = () => {
       note.tags = window.CGIANoteSchema.parseTagsInput(tagsInput.value);
-      persistNote(note);
+      persistWithFeedback(noteEl, note);
     };
     tagsInput.addEventListener("change", saveTags);
     tagsInput.addEventListener("blur", saveTags);
@@ -380,7 +401,7 @@
 
   // ---------- interactions ----------
 
-  function initDrag(noteEl, note) {
+  function initDrag(noteEl, note, state) {
     const header = noteEl.querySelector(".cgia-note-header");
     let dragging = false;
     let startX, startY, startLeft, startTop;
@@ -410,7 +431,7 @@
 
       noteEl.style.left = `${newLeft}px`;
       noteEl.style.top = `${newTop}px`;
-    });
+    }, { signal: state.listeners.signal });
 
     document.addEventListener("mouseup", () => {
       if (!dragging) return;
@@ -418,8 +439,8 @@
       note.position.x = parseInt(noteEl.style.left);
       note.position.y = parseInt(noteEl.style.top);
       note.updatedAt = new Date().toISOString();
-      window.CGIAStorage.saveNote(note);
-    });
+      persistWithFeedback(noteEl, note);
+    }, { signal: state.listeners.signal });
   }
 
   function initCollapse(noteEl, note) {
@@ -433,38 +454,64 @@
         noteEl.style.height = `${note.size.height}px`; // 展开时恢复保存的高度
       }
       note.updatedAt = new Date().toISOString();
-      window.CGIAStorage.saveNote(note);
+      persistWithFeedback(noteEl, note);
     });
   }
 
   function initClose(noteEl, note) {
     const btn = noteEl.querySelector(".cgia-note-close");
-    btn.addEventListener("click", () => {
+    btn.addEventListener("click", async () => {
+      if (btn.disabled) return;
+      btn.disabled = true;
+      const previousStatus = note.status;
       note.status = "hidden";
-      note.updatedAt = new Date().toISOString();
-      window.CGIAStorage.saveNote(note);
-      noteEl.remove();
-      activeNotes.delete(note.noteId);
+      note.draftQuestion = noteEl.querySelector(".cgia-question-input").value;
+      try {
+        await persistNote(note);
+        disposeNote(noteEl);
+        noteEl.remove();
+        activeNotes.delete(note.noteId);
+      } catch (error) {
+        note.status = previousStatus;
+        showSaveFeedback(noteEl, error.message, true);
+        btn.disabled = false;
+      }
     });
   }
 
   async function handleSend(noteEl, note) {
+    const state = noteStates.get(noteEl);
+    if (!state || state.sending || state.disposed) return;
     const input = noteEl.querySelector(".cgia-question-input");
     const sendBtn = noteEl.querySelector(".cgia-send-button");
     const messagesEl = noteEl.querySelector(".cgia-messages");
 
     const question = input.value.trim();
     if (!question) return;
-
+    state.sending = true;
+    state.request = new AbortController();
     sendBtn.disabled = true;
-    input.value = "";
-
-    appendMessage(messagesEl, "user", question);
-
-    const streamEl = appendStreamingAssistant(messagesEl);
+    input.disabled = true;
+    const stopBtn = noteEl.querySelector(".cgia-stop-button");
+    stopBtn.hidden = false;
+    const now = new Date().toISOString();
+    const history = window.CGIANoteSchema.buildFollowups(note.messages)
+      .filter((turn) => turn.status === "completed")
+      .flatMap((turn) => [{ role: "user", content: turn.q }, { role: "assistant", content: turn.a }]);
+    const userMessage = { role: "user", content: question, createdAt: now, status: "completed" };
+    const assistantMessage = { role: "assistant", content: "", createdAt: now, status: "pending" };
+    note.messages.push(userMessage, assistantMessage);
+    note.draftQuestion = "";
+    let streamEl;
     let answer = "";
-
+    let initialSaveSucceeded = false;
     try {
+      await persistNote(note);
+      initialSaveSucceeded = true;
+      input.value = "";
+      input.disabled = false;
+      appendMessage(messagesEl, "user", question);
+      streamEl = appendStreamingAssistant(messagesEl);
       const payload = {
         noteId: note.noteId,
         pageUrl: note.pageUrl,
@@ -475,40 +522,57 @@
         fullMessageText: note.fullMessageText || "",
         mainConversation: note.mainConversation || [],
         userQuestion: question,
-        conversationHistory: note.messages
-          .filter((m) => m.status === "completed" && (m.role === "user" || m.role === "assistant"))
-          .map((m) => ({ role: m.role, content: m.content })),
+        conversationHistory: history,
         options: { language: "zh-CN", answerStyle: "clear_and_step_by_step" }
       };
 
       const res = await window.CGIAApiClient.askModelStream(payload, (_delta, full) => {
+        answer = full;
+        assistantMessage.content = full;
+        assistantMessage.status = "streaming";
         updateStreamingAssistant(streamEl, full);
-      });
+        if (!state.partialTimer) state.partialTimer = setTimeout(() => {
+          state.partialTimer = null;
+          persistWithFeedback(noteEl, note);
+        }, 500);
+      }, { signal: state.request.signal });
 
       answer = res.answer || "";
       finalizeStreamingAssistant(streamEl, answer);
 
-      note.messages.push(
-        { role: "user", content: question, createdAt: new Date().toISOString(), status: "completed" },
-        { role: "assistant", content: answer, createdAt: new Date().toISOString(), status: "completed" }
-      );
-      note.updatedAt = new Date().toISOString();
-      window.CGIAStorage.saveNote(note);
+      assistantMessage.content = answer;
+      assistantMessage.status = "completed";
     } catch (err) {
-      removeStreamingAssistant(streamEl);
+      if (!initialSaveSucceeded) {
+        note.messages.splice(note.messages.indexOf(userMessage), 2);
+        note.draftQuestion = question;
+        input.value = question;
+      } else {
+        assistantMessage.content = err.partialAnswer || answer;
+        assistantMessage.status = err.code === "CANCELLED" ? "cancelled" : "failed";
+        assistantMessage.error = err.message;
+        if (assistantMessage.content) finalizeStreamingAssistant(streamEl, assistantMessage.content);
+        else removeStreamingAssistant(streamEl);
+      }
       const errDiv = document.createElement("div");
       errDiv.className = "cgia-error-msg";
       errDiv.textContent = `错误：${err.message}`;
       messagesEl.appendChild(errDiv);
       messagesEl.scrollTop = messagesEl.scrollHeight;
     } finally {
+      clearTimeout(state.partialTimer);
+      state.partialTimer = null;
+      if (initialSaveSucceeded) await persistWithFeedback(noteEl, note);
+      state.sending = false;
+      state.request = null;
       sendBtn.disabled = false;
+      input.disabled = false;
+      stopBtn.hidden = true;
     }
   }
 
   // 用户拖右下角缩放（CSS resize）后，停止 300ms 再持久化新尺寸
-  function initResize(noteEl, note) {
-    let saveTimer = null;
+  function initResize(noteEl, note, state) {
     const observer = new ResizeObserver(() => {
       if (note.collapsed) return; // 折叠态高度是 auto，不存档
       const w = noteEl.offsetWidth;
@@ -517,25 +581,45 @@
       if (note.size && note.size.width === w && note.size.height === h) return;
 
       note.size = { width: w, height: h };
-      clearTimeout(saveTimer);
-      saveTimer = setTimeout(() => {
-        note.updatedAt = new Date().toISOString();
-        window.CGIAStorage.saveNote(note);
+      clearTimeout(state.resizeTimer);
+      state.resizeTimer = setTimeout(() => {
+        persistWithFeedback(noteEl, note);
       }, 300);
     });
     observer.observe(noteEl);
+    state.observer = observer;
+  }
+
+  function disposeNote(noteEl) {
+    const state = noteStates.get(noteEl);
+    if (!state) return;
+    state.disposed = true;
+    state.listeners.abort();
+    state.request?.abort();
+    state.observer?.disconnect();
+    clearTimeout(state.resizeTimer);
+    clearTimeout(state.draftTimer);
+    clearTimeout(state.partialTimer);
   }
 
   function wireNote(noteEl, note) {
+    const state = { listeners: new AbortController(), sending: false, disposed: false };
+    noteStates.set(noteEl, state);
     noteEl.addEventListener("mousedown", () => bringNoteToFront(noteEl));
-    initDrag(noteEl, note);
+    initDrag(noteEl, note, state);
     initCollapse(noteEl, note);
     initClose(noteEl, note);
-    initResize(noteEl, note);
+    initResize(noteEl, note, state);
     initMetaBar(noteEl, note);
 
     const sendBtn = noteEl.querySelector(".cgia-send-button");
     const input = noteEl.querySelector(".cgia-question-input");
+    noteEl.querySelector(".cgia-stop-button").addEventListener("click", () => state.request?.abort());
+    input.addEventListener("input", () => {
+      note.draftQuestion = input.value;
+      clearTimeout(state.draftTimer);
+      state.draftTimer = setTimeout(() => persistWithFeedback(noteEl, note), 300);
+    });
     sendBtn.addEventListener("click", () => handleSend(noteEl, note));
     input.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
@@ -561,7 +645,7 @@
 
   // ---------- public API ----------
 
-  function createNote(selectionInfo) {
+  async function createNote(selectionInfo) {
     const now = new Date().toISOString();
     const position = calculateNotePosition(selectionInfo.rect);
     const settings = window.CGIAStorage.getSettingsSync();
@@ -590,22 +674,26 @@
       updatedAt: now
     };
 
-    window.CGIAStorage.saveNote(note);
-    renderNote(note);
+    await window.CGIAStorage.saveNote(note);
+    if (location.href === note.pageUrl) renderNote(note);
     return note;
   }
 
-  async function loadNotesForPage(pageUrl) {
+  async function loadNotesForPage(pageUrl, force = false) {
     const settings = window.CGIAStorage.getSettingsSync();
-    if (!settings.autoRestoreNotes) return;
+    if (!force && !settings.autoRestoreNotes) return;
 
     const notes = await window.CGIAStorage.loadNotesForPage(pageUrl);
+    if (location.href !== pageUrl) return;
     notes.filter((n) => n.status === "visible").forEach((note) => renderNote(note));
   }
 
   function clearNotesForPage(pageUrl) {
     for (const [noteId, { note, el }] of activeNotes.entries()) {
       if (note.pageUrl === pageUrl) {
+        note.draftQuestion = el.querySelector(".cgia-question-input").value;
+        persistWithFeedback(el, note);
+        disposeNote(el);
         el.remove();
         activeNotes.delete(noteId);
       }
