@@ -1,89 +1,58 @@
 (function () {
-  function sendRuntimeMessage(message) {
+  function askModelStream(payload, onChunk, options = {}) {
     return new Promise((resolve, reject) => {
-      if (!chrome.runtime?.id) {
-        reject(new Error("扩展上下文已失效，请刷新页面。"));
-        return;
-      }
-
-      try {
-        chrome.runtime.sendMessage(message, (response) => {
-          if (chrome.runtime.lastError) {
-            reject(new Error(chrome.runtime.lastError.message));
-            return;
-          }
-          if (!response) {
-            reject(new Error("扩展未返回响应，请确认插件已启用。"));
-            return;
-          }
-          if (response.error) {
-            reject(new Error(response.error));
-            return;
-          }
-          resolve(response);
-        });
-      } catch (err) {
-        reject(err);
-      }
-    });
-  }
-
-  function askModelStream(payload, onChunk) {
-    return new Promise((resolve, reject) => {
-      if (!chrome.runtime?.id) {
-        reject(new Error("扩展上下文已失效，请刷新页面。"));
-        return;
-      }
-
-      const settings = window.CGIAStorage.getSettingsSync();
-
-      if (settings.mode === "api" && !settings.apiKey?.trim()) {
-        reject(new Error("请先在扩展设置中填写 API Key，或将模式切换为 Mock。"));
-        return;
-      }
-
       let port;
-      try {
-        port = chrome.runtime.connect({ name: "ask-stream" });
-      } catch (err) {
-        reject(err);
-        return;
-      }
-
       let answer = "";
-
-      port.onMessage.addListener((msg) => {
-        if (msg.type === "chunk") {
-          if (typeof onChunk === "function") {
-            onChunk(msg.delta, msg.full);
+      let settled = false;
+      const signal = options.signal;
+      const settings = window.CGIAStorage.getSettingsSync();
+      let timer;
+      const finish = (error, response) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", abort);
+        if (error) {
+          error.partialAnswer = error.partialAnswer || answer;
+          reject(error);
+        } else resolve(response);
+        try { port?.disconnect(); } catch { /* Extension may have been reloaded. */ }
+      };
+      const abort = () => {
+        try { port?.postMessage({ type: "CANCEL" }); } catch { /* Port already closed. */ }
+        const error = new Error("请求已停止。");
+        error.code = "CANCELLED";
+        finish(error);
+      };
+      try {
+        if (!chrome.runtime?.id) throw new Error("扩展上下文已失效，请刷新页面。");
+        if (signal?.aborted) return abort();
+        port = chrome.runtime.connect({ name: "ask-stream" });
+        port.onMessage.addListener((message) => {
+          if (message.type === "chunk") {
+            answer = message.full || answer;
+            try {
+              if (typeof onChunk === "function") onChunk(message.delta, answer);
+            } catch (error) { finish(error); }
+          } else if (message.type === "done") {
+            finish(null, { noteId: message.noteId || payload.noteId, answer: message.answer || answer, status: "completed" });
+          } else if (message.type === "error") {
+            const error = new Error(message.error || "请求失败");
+            error.partialAnswer = message.partialAnswer || answer;
+            error.code = message.code;
+            finish(error);
           }
-          answer = msg.full;
-        } else if (msg.type === "done") {
-          resolve({
-            noteId: msg.noteId || payload.noteId,
-            answer: msg.answer || answer,
-            status: msg.status || "completed"
-          });
-          port.disconnect();
-        } else if (msg.type === "error") {
-          reject(new Error(msg.error || "请求失败"));
-          port.disconnect();
-        }
-      });
-
-      port.onDisconnect.addListener(() => {
-        if (chrome.runtime.lastError) {
-          reject(new Error(chrome.runtime.lastError.message));
-        }
-      });
-
-      port.postMessage({ type: "ASK_STREAM", payload, settings });
+        });
+        port.onDisconnect.addListener(() => {
+          finish(new Error(chrome.runtime.lastError?.message || "连接已断开，已保留已收到的内容。"));
+        });
+        signal?.addEventListener("abort", abort, { once: true });
+        timer = setTimeout(() => finish(new Error("扩展请求超时，已保留已收到的内容。")), (settings.requestTimeoutMs || 30000) + 5000);
+        port.postMessage({ type: "ASK_STREAM", payload, settings });
+      } catch (error) {
+        finish(error);
+      }
     });
   }
-
-  async function askModel(payload) {
-    return askModelStream(payload);
-  }
-
-  window.CGIAApiClient = { askModel, askModelStream };
+  window.CGIAApiClient = { askModel: (payload) => askModelStream(payload), askModelStream };
 })();

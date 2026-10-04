@@ -168,17 +168,21 @@
     btn.style.top = `${top}px`;
     btn.style.left = `${left}px`;
 
-    btn.addEventListener("click", (e) => {
+    btn.addEventListener("click", async (e) => {
       e.preventDefault();
       e.stopPropagation();
+      if (btn.disabled) return;
+      btn.disabled = true;
       try {
         if (currentSelectionInfo) {
-          window.CGIANoteManager.createNote(currentSelectionInfo);
+          await window.CGIANoteManager.createNote(currentSelectionInfo);
         }
+        hideSelectionButton();
       } catch (err) {
-        // createNote failed silently
+        btn.disabled = false;
+        btn.textContent = "保存失败，重试";
+        btn.title = err.message;
       }
-      hideSelectionButton();
     });
 
     document.body.appendChild(btn);

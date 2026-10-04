@@ -1,5 +1,4 @@
 const SETTINGS_KEY = "cgia_standalone_settings";
-const NOTES_KEY = "cgia_standalone_notes";
 
 const PROVIDER_PRESETS = {
   deepseek: {
@@ -76,6 +75,9 @@ function readForm() {
   if (Number.isNaN(timeoutVal) || timeoutVal < 5000) {
     throw new Error("请求超时必须 >= 5000 毫秒");
   }
+  if (!Number.isInteger(maxSelVal) || maxSelVal < 2 || !Number.isInteger(maxSurrVal) || maxSurrVal < 0) {
+    throw new Error("选中文本上限必须 >= 2，上下文上限必须 >= 0。");
+  }
 
   const mdExportDir = document.getElementById("mdExportDir").value.trim() || "Notes";
   const dirCheck = window.CGIANoteSchema.validateMdExportDir(mdExportDir);
@@ -117,14 +119,7 @@ function setMessage(el, text, isError = false) {
 }
 
 function loadAllNotesFromStorage() {
-  return new Promise((resolve) => {
-    chrome.storage.local.get(NOTES_KEY, (result) => {
-      const all = Object.values(result[NOTES_KEY] || {});
-      resolve(
-        all.map((n) => window.CGIANoteSchema.normalizeNote(n, DEFAULT_SETTINGS))
-      );
-    });
-  });
+  return window.CGIANoteClient.listNotes();
 }
 
 function notesForExportScope(notes, scope) {
@@ -132,11 +127,13 @@ function notesForExportScope(notes, scope) {
   return notes.filter((n) => n.pageUrl === cachedPageUrl);
 }
 
-function prepareExportNotes(allNotes) {
+async function prepareExport(allNotes) {
   const scope = document.getElementById("exportScope").value;
   const options = readExportOptions();
   const scoped = notesForExportScope(allNotes, scope);
-  return window.CGIANoteSchema.filterNotesForExport(scoped, options);
+  const settings = await getExportSettings();
+  const receipts = await window.CGIANoteClient.getReceipts();
+  return { ...window.CGIANoteSchema.prepareMarkdownExport(scoped, options, receipts, settings.mdExportDir), settings };
 }
 
 function formatTypeSummary(typeCounts) {
@@ -158,14 +155,15 @@ function formatTopicSummary(preview) {
 
 async function refreshExportPreview() {
   const notes = await loadAllNotesFromStorage();
-  const filtered = prepareExportNotes(notes);
-  const mergeByUrl = readExportOptions().mergeByUrl;
-  const preview = window.CGIANoteSchema.buildExportPreviewWithMerge(filtered, mergeByUrl);
+  const plan = await prepareExport(notes);
+  const preview = window.CGIANoteSchema.buildExportPreview(plan.notes);
+  preview.mdFiles = plan.files.length;
+  preview.mergeGroups = plan.files.filter((file) => file.noteIds.length > 1).length;
 
   const scopeLabel =
     document.getElementById("exportScope").value === "page" ? "当前页" : "全部";
   const lineInfo =
-    mergeByUrl && preview.mergeGroups
+    preview.mergeGroups
       ? `${preview.count} 条便签 → ${preview.mdFiles} 个 Markdown 文件（${preview.mergeGroups} 组合并）`
       : `${preview.count} 条便签 → ${preview.mdFiles} 个 Markdown 文件`;
 
@@ -178,59 +176,40 @@ async function refreshExportPreview() {
 
 async function refreshNoteCount() {
   const notes = await loadAllNotesFromStorage();
-  const visible = notes.filter((n) => n.status !== "hidden");
 
   chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
     cachedPageUrl = tabs[0]?.url || "";
-    const pageCount = visible.filter((n) => n.pageUrl === cachedPageUrl).length;
+    const pageCount = notes.filter((n) => n.pageUrl === cachedPageUrl).length;
+    const hiddenCount = notes.filter((n) => n.pageUrl === cachedPageUrl && n.status === "hidden").length;
     document.getElementById("noteCount").textContent =
-      `便签：共 ${visible.length} 条（当前页 ${pageCount} 条）`;
-    refreshExportPreview();
+      `便签：共 ${notes.length} 条（当前页 ${pageCount} 条，已关闭 ${hiddenCount} 条）`;
+    refreshExportPreview().catch(showExportError);
   });
 }
 
 async function getExportSettings() {
-  const stored = await new Promise((resolve) => {
+  const stored = await new Promise((resolve, reject) => {
     chrome.storage.local.get(SETTINGS_KEY, (result) => {
+      if (chrome.runtime.lastError) return reject(new Error(chrome.runtime.lastError.message));
       resolve({ ...DEFAULT_SETTINGS, ...(result[SETTINGS_KEY] || {}) });
     });
   });
-  try {
-    const form = readForm();
-    return { ...stored, mdExportDir: form.mdExportDir };
-  } catch {
-    return stored;
-  }
+  const check = window.CGIANoteSchema.validateMdExportDir(document.getElementById("mdExportDir").value.trim() || "Notes");
+  if (!check.ok) throw new Error(check.error);
+  return { ...stored, mdExportDir: check.dir };
 }
 
-async function markNotesExported(notes) {
-  return new Promise((resolve) => {
-    chrome.storage.local.get(NOTES_KEY, (result) => {
-      const all = { ...(result[NOTES_KEY] || {}) };
-      notes.forEach((note) => {
-        const hash = window.CGIANoteSchema.computeContentHashForNote(note);
-        if (all[note.noteId]) {
-          all[note.noteId].lastExportedContentHash = hash;
-        }
-      });
-      chrome.storage.local.set({ [NOTES_KEY]: all }, () => resolve());
-    });
-  });
+function showExportError(error) {
+  setMessage(document.getElementById("exportMsg"), error.message, true);
 }
 
-async function exportPreparedNotes(notes) {
-  const options = readExportOptions();
-  const files = window.CGIANoteSchema.notesToMarkdownFiles(notes, {
-    mergeByUrl: options.mergeByUrl
-  });
+async function exportPreparedNotes(plan) {
+  const { files, notes } = plan;
   if (!files.length) {
     throw new Error("没有可导出的便签。");
   }
 
-  const settings = await getExportSettings();
-
-  await window.CGIAExport.downloadMarkdown(files, settings);
-  await markNotesExported(notes);
+  await window.CGIAExport.downloadMarkdown(files, plan.settings);
   return { noteCount: notes.length, fileCount: files.length };
 }
 
@@ -243,7 +222,7 @@ function bindExportPreviewListeners() {
     "exportOnlyChanged"
   ].forEach((id) => {
     document.getElementById(id).addEventListener("change", () => {
-      refreshExportPreview();
+      refreshExportPreview().catch(showExportError);
     });
   });
 }
@@ -256,9 +235,10 @@ document.getElementById("providerPreset").addEventListener("change", (e) => {
 });
 
 chrome.storage.local.get(SETTINGS_KEY, (result) => {
+  if (chrome.runtime.lastError) { showExportError(new Error(chrome.runtime.lastError.message)); return; }
   const settings = { ...DEFAULT_SETTINGS, ...(result[SETTINGS_KEY] || {}) };
   loadForm(settings);
-  refreshNoteCount();
+  refreshNoteCount().catch(showExportError);
   bindExportPreviewListeners();
 });
 
@@ -277,6 +257,10 @@ document.getElementById("saveBtn").addEventListener("click", () => {
     }
 
     chrome.storage.local.set({ [SETTINGS_KEY]: settings }, () => {
+      if (chrome.runtime.lastError) {
+        setMessage(msg, chrome.runtime.lastError.message, true);
+        return;
+      }
       setMessage(msg, "设置已保存。");
       setTimeout(() => {
         msg.textContent = "";
@@ -329,21 +313,46 @@ document.getElementById("exportMdBtn").addEventListener("click", async () => {
   try {
     btn.disabled = true;
     const allNotes = await loadAllNotesFromStorage();
-    const notes = prepareExportNotes(allNotes);
-    if (!notes.length) {
+    const plan = await prepareExport(allNotes);
+    if (!plan.files.length) {
       throw new Error("没有符合条件的便签（可取消「仅导出变更条目」试试）。");
     }
-    const { noteCount, fileCount } = await exportPreparedNotes(notes);
+    const { noteCount, fileCount } = await exportPreparedNotes(plan);
     const scope =
       document.getElementById("exportScope").value === "page" ? "当前页" : "全部";
     setMessage(
       msg,
       `已导出 ${scope} ${noteCount} 条便签（${fileCount} 个 Markdown 文件）。`
     );
-    refreshExportPreview();
+    refreshExportPreview().catch(showExportError);
   } catch (e) {
     setMessage(msg, e.message, true);
   } finally {
     btn.disabled = false;
+  }
+});
+
+document.getElementById("mdExportDir").addEventListener("change", () => refreshExportPreview().catch(showExportError));
+document.getElementById("restoreNotesBtn").addEventListener("click", async () => {
+  const button = document.getElementById("restoreNotesBtn");
+  button.disabled = true;
+  try {
+    const count = await window.CGIANoteClient.restoreNotes(cachedPageUrl);
+    const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (tabs[0]?.id && tabs[0].url === cachedPageUrl) {
+      try {
+        await chrome.tabs.sendMessage(tabs[0].id, { type: "RESTORE_NOTES" });
+      } catch {
+        setMessage(document.getElementById("exportMsg"), `已恢复 ${count} 条便签；请刷新当前页面。`);
+        await refreshNoteCount();
+        return;
+      }
+    }
+    setMessage(document.getElementById("exportMsg"), `已恢复 ${count} 条便签。`);
+    await refreshNoteCount();
+  } catch (error) {
+    showExportError(error);
+  } finally {
+    button.disabled = false;
   }
 });

@@ -57,56 +57,26 @@
       const user = msgs[i];
       if (user?.role !== "user") continue;
       const assistant = msgs[i + 1];
-      if (assistant?.role !== "assistant") continue;
-
       followups.push({
         q: user.content,
-        a: assistant.content,
-        time: user.createdAt || new Date().toISOString()
+        a: assistant?.role === "assistant" ? assistant.content : "",
+        status: assistant?.role === "assistant" ? assistant.status || "completed" : "pending",
+        error: assistant?.role === "assistant" ? assistant.error || "" : "",
+        time: user.createdAt || ""
       });
-      i += 1;
+      if (assistant?.role === "assistant") i += 1;
     }
 
     return followups;
   }
 
-  function computeContentHashFromParts(url, selectedText, followups) {
-    const payload = JSON.stringify({
-      url: url || "",
-      selected_text: selectedText || "",
-      followups: (followups || []).map((f) => ({ q: f.q || "", a: f.a || "" }))
-    });
-    return `hash_${simpleHash(payload)}`;
-  }
-
   function computeContentHashForNote(note) {
-    return computeContentHashFromParts(
-      note.pageUrl,
-      note.selectedText,
-      buildFollowups(note.messages)
-    );
+    return noteToJsonlRecord(note).content_hash;
   }
 
   function computeContentHashForRecord(record) {
-    if (record.content_hash) return record.content_hash;
-
-    if (record.turns?.length) {
-      const payload = JSON.stringify({
-        url: record.url || "",
-        turns: record.turns.map((t) => ({
-          id: t.id || "",
-          selected_text: t.selected_text || "",
-          followups: (t.followups || []).map((f) => ({ q: f.q || "", a: f.a || "" }))
-        }))
-      });
-      return `hash_${simpleHash(payload)}`;
-    }
-
-    return computeContentHashFromParts(
-      record.url,
-      record.selected_text,
-      record.followups
-    );
+    const { content_hash, ...content } = record;
+    return `hash_${simpleHash(JSON.stringify(content))}`;
   }
 
   function noteHasFollowups(note) {
@@ -120,19 +90,12 @@
   function filterNotesForExport(notes, options = {}) {
     const {
       excludeEmpty = false,
-      excludeNoFollowups = false,
-      onlyChanged = false
+      excludeNoFollowups = false
     } = options;
     return (notes || []).filter((n) => {
-      if (n.status === "hidden") return false;
       if (excludeEmpty && noteIsEmpty(n)) return false;
       if (excludeNoFollowups && !noteHasFollowups(n)) return false;
-      if (onlyChanged) {
-        const hash = computeContentHashForNote(n);
-        if (n.lastExportedContentHash && n.lastExportedContentHash === hash) {
-          return false;
-        }
-      }
+      // Change detection belongs to the final artifact, after URL grouping.
       return true;
     });
   }
@@ -204,7 +167,7 @@
 
     return {
       id: `rec_${note.noteId}`,
-      time: note.updatedAt || note.createdAt || new Date().toISOString(),
+      time: note.createdAt || note.updatedAt || new Date().toISOString(),
       selected_text: note.selectedText || "",
       followups,
       note_type: noteType,
@@ -223,16 +186,10 @@
     const turns = sorted.map(turnFromNote);
     const allTags = [...new Set(sorted.flatMap((n) => n.tags || []))];
     const url = first.pageUrl || "";
-    const latest = sorted.reduce((a, b) =>
-      new Date(b.updatedAt || b.createdAt || 0) > new Date(a.updatedAt || a.createdAt || 0)
-        ? b
-        : a
-    );
-
     const record = {
       schema_version: SCHEMA_VERSION,
       id: `rec_url_${hashUrl(url)}`,
-      time: latest.updatedAt || latest.createdAt || new Date().toISOString(),
+      time: first.createdAt || first.updatedAt || new Date().toISOString(),
       source: first.siteId || "unknown",
       url,
       main_topic: first.mainTopic || "",
@@ -257,7 +214,7 @@
     const record = {
       schema_version: SCHEMA_VERSION,
       id: `rec_${note.noteId}`,
-      time: note.updatedAt || note.createdAt || new Date().toISOString(),
+      time: note.createdAt || note.updatedAt || new Date().toISOString(),
       source: note.siteId || "unknown",
       url: note.pageUrl || "",
       main_topic: note.mainTopic || "",
@@ -279,10 +236,7 @@
       return notes.map((n) => noteToJsonlRecord(n));
     }
 
-    return groupNotesByUrl(notes).map((g) => {
-      if (g.notes.length === 1) return noteToJsonlRecord(g.notes[0]);
-      return mergeNotesToRecord(g.notes);
-    });
+    return groupNotesByUrl(notes).map((group) => mergeNotesToRecord(group.notes));
   }
 
   function exportFilenameTopic(records) {
@@ -361,20 +315,20 @@
     const contentHash = computeContentHashForRecord(record);
     const lines = [
       "---",
-      `source: ${record.source || "unknown"}`,
-      `url: ${record.url || ""}`,
-      `type: ${record.note_type || "general"}`,
-      `id: ${record.id || ""}`,
-      `content_hash: ${contentHash}`,
-      `created: ${created.toISOString()}`
+      `source: ${JSON.stringify(record.source || "unknown")}`,
+      `url: ${JSON.stringify(record.url || "")}`,
+      `type: ${JSON.stringify(record.note_type || "general")}`,
+      `id: ${JSON.stringify(record.id || "")}`,
+      `content_hash: ${JSON.stringify(contentHash)}`,
+      `created: ${JSON.stringify(created.toISOString())}`
     ];
     if (tags.length) {
       lines.push("tags:");
-      tags.forEach((t) => lines.push(`  - ${t}`));
+      tags.forEach((t) => lines.push(`  - ${JSON.stringify(String(t))}`));
     }
     if (marks.length) {
       lines.push("marks:");
-      marks.forEach((m) => lines.push(`  - ${m}`));
+      marks.forEach((m) => lines.push(`  - ${JSON.stringify(String(m))}`));
     }
     lines.push("---");
     return lines.join("\n");
@@ -391,6 +345,10 @@
         }
         if (a) {
           parts.push(a, "");
+        }
+        if (item.status && item.status !== "completed") {
+          const labels = { pending: "回答尚未完成", streaming: "回答尚未完成", failed: "请求失败", cancelled: "请求已停止", interrupted: "回答未完整生成" };
+          parts.push(`> ${labels[item.status] || "回答尚未完成"}${item.error ? `：${item.error}` : ""}`, "");
         }
       });
     } else {
@@ -489,7 +447,7 @@
     const created = parseTime(record.time);
     const stamp = formatFilenameTimestamp(created);
     const topic = sanitizeFilename(record.main_topic || "未命名");
-    const recId = sanitizeFilename((record.id || "").replace("rec_", ""), 12);
+    const recId = sanitizeFilename((record.id || "").replace(/^rec_/, ""), 80);
     const extra = suffix ? `-${suffix}` : "";
     return `${stamp}-${topic}-${recId}${extra}.md`;
   }
@@ -505,6 +463,25 @@
     }));
   }
 
+  function prepareMarkdownExport(notes, options = {}, receipts = {}, exportDir = "Notes") {
+    const eligible = filterNotesForExport(notes, options);
+    const records = notesToJsonlRecords(eligible, options);
+    const mode = options.mergeByUrl ? "merged" : "single";
+    const files = records.map((record) => {
+      const content = renderMarkdown(record);
+      const filename = markdownOutputFilename(record);
+      const receiptKey = `cgia_export:${JSON.stringify([exportDir, mode, options.mergeByUrl ? record.url : record.id])}`;
+      // Compare the complete file, including metadata and all grouped notes.
+      const contentHash = `md_${simpleHash(content)}`;
+      const noteIds = record.turns?.length
+        ? record.turns.map((turn) => turn.id.replace(/^rec_/, ""))
+        : [record.id.replace(/^rec_/, "")];
+      return { filename, content, receiptKey, contentHash, noteIds };
+    }).filter((file) => !options.onlyChanged || receipts[file.receiptKey] !== file.contentHash);
+    const included = new Set(files.flatMap((file) => file.noteIds));
+    return { files, notes: eligible.filter((note) => included.has(note.noteId)) };
+  }
+
   function normalizeNote(note, defaults = {}) {
     return {
       ...note,
@@ -515,12 +492,16 @@
         ? note.marks.filter((m) => VALID_MARKS.has(m))
         : [],
       tags: Array.isArray(note.tags) ? note.tags : [],
+      messages: Array.isArray(note.messages) ? note.messages : [],
+      position: note.position || { x: 20, y: 20 },
+      status: note.status || "visible",
+      revision: note.revision || 0,
       mainTopic: note.mainTopic || "",
       mainQuestion: note.mainQuestion || ""
     };
   }
 
-  window.CGIANoteSchema = {
+  globalThis.CGIANoteSchema = {
     SCHEMA_VERSION,
     NOTE_TYPES,
     MARKS,
@@ -547,6 +528,7 @@
     markdownOutputFilename,
     noteToMarkdown,
     notesToMarkdownFiles,
+    prepareMarkdownExport,
     validateMdExportDir,
     normalizeNote
   };
