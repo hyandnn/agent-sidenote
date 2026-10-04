@@ -68,4 +68,8 @@ node --test tests/*.test.js
 
 回归检查覆盖存储迁移与并发、导出一致性、流式异常、便签交互、下载状态和路由生命周期。网站的实时 DOM 适配仍需在浏览器中检查。
 
-第三方库及许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+## 许可
+
+项目代码采用 [MIT License](LICENSE)，Copyright (c) 2026 Haoling Yang。
+
+第三方库保留各自的许可，详见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
