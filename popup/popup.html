@@ -39,6 +39,12 @@
     <div class="cgia-form-row">
       <label>API 地址（Base URL）</label>
       <input type="text" id="apiBaseUrl" placeholder="https://api.deepseek.com" />
+      <span class="cgia-field-hint">测试或保存时仅申请此 API 主机的访问权限。</span>
+    </div>
+
+    <div class="cgia-form-row cgia-inline-actions">
+      <span id="apiAccessStatus" class="cgia-inline-msg" aria-live="polite"></span>
+      <button type="button" id="revokeApiBtn" class="cgia-secondary-btn">撤销 API 授权</button>
     </div>
 
     <div class="cgia-form-row cgia-inline-actions">
@@ -148,6 +154,7 @@
     <p id="saveMsg" class="cgia-save-msg"></p>
 
     <script src="../shared/note_schema.js"></script>
+    <script src="../shared/api_permissions.js"></script>
     <script src="../shared/note_client.js"></script>
     <script src="../shared/export.js"></script>
     <script src="./popup.js"></script>

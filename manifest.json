@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Agent Sidenote",
-  "version": "1.6.1",
+  "version": "1.6.2",
   "description": "在 AI 对话网页选中文字，用便签旁注追问并导出 Markdown 笔记。支持 ChatGPT、豆包、Gemini。",
   "permissions": [
     "storage",
@@ -13,8 +13,11 @@
     "https://chat.openai.com/*",
     "https://www.doubao.com/*",
     "https://doubao.com/*",
-    "https://gemini.google.com/*",
-    "https://*/*"
+    "https://gemini.google.com/*"
+  ],
+  "optional_host_permissions": [
+    "https://*/*",
+    "http://*/*"
   ],
   "background": {
     "service_worker": "background/service_worker.js"

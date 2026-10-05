@@ -1,5 +1,5 @@
 (function () {
-  const { truncateAroundSelection, truncateSimple, selectionAnchorElement } =
+  const { truncateAroundSelection, truncateSimple, readMessageText, canonicalMessageNodes, findSelectedMessage } =
     window.CGIAAdapterShared;
 
   function match(hostname) {
@@ -8,15 +8,16 @@
 
   function getMessageElement(selection) {
     try {
-      const el = selectionAnchorElement(selection);
-      return el ? el.closest("[data-message-author-role]") : null;
+      return findSelectedMessage(selection, getAllMessages());
     } catch (e) {
       return null;
     }
   }
 
   function getAllMessages() {
-    return Array.from(document.querySelectorAll("[data-message-author-role]"));
+    const root = document.querySelector("main") || document.body;
+    return canonicalMessageNodes(Array.from(root.querySelectorAll('[data-message-author-role="user"], [data-message-author-role="assistant"]')))
+      .filter((el) => extractMessageText(el));
   }
 
   function getRole(messageEl) {
@@ -25,8 +26,12 @@
       : "assistant";
   }
 
+  function extractMessageText(messageEl) {
+    return readMessageText(messageEl.querySelector('.markdown, [data-testid="user-message"]') || messageEl);
+  }
+
   function getMessageText(messageEl, selectedText, maxLength) {
-    return truncateAroundSelection(messageEl.innerText || "", selectedText, maxLength);
+    return truncateAroundSelection(extractMessageText(messageEl), selectedText, maxLength);
   }
 
   function getMainConversation(messageEl, maxMessages, perMessageMax) {
@@ -35,13 +40,14 @@
       if (all.length === 0) return [];
 
       let endIdx = messageEl ? all.indexOf(messageEl) : all.length;
-      if (endIdx === -1) endIdx = all.length;
+      if (endIdx === -1) endIdx = all.findIndex((el) => el.contains(messageEl));
+      if (endIdx === -1) return [];
 
       return all
         .slice(Math.max(0, endIdx - maxMessages), endIdx)
         .map((el) => ({
           role: getRole(el),
-          content: truncateSimple(el.innerText, perMessageMax)
+          content: truncateSimple(extractMessageText(el), perMessageMax)
         }))
         .filter((m) => m.content);
     } catch (e) {
@@ -50,7 +56,7 @@
   }
 
   function shouldIgnoreElement(el) {
-    return false;
+    return window.CGIAAdapterShared.shouldIgnoreElement(el);
   }
 
   function getConversationTitle() {

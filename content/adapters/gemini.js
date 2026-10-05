@@ -1,14 +1,14 @@
 (function () {
-  const { truncateAroundSelection, truncateSimple, sortByDocumentOrder, selectionAnchorElement } =
+  const { truncateAroundSelection, truncateSimple, sortByDocumentOrder, readMessageText, canonicalMessageNodes, findSelectedMessage } =
     window.CGIAAdapterShared;
 
   const THOUGHTS_ANCESTOR = "model-thoughts, .thoughts-container, .thoughts-content";
 
   const MESSAGE_LIST_SELECTORS = [
-    ".conversation-container",
-    '[class*="conversation-container"]',
     "infinite-scroller",
-    "main"
+    "main",
+    ".conversation-container",
+    '[class*="conversation-container"]'
   ];
 
   const USER_MESSAGE_SELECTORS = [
@@ -50,13 +50,6 @@
     return !!el.closest(THOUGHTS_ANCESTOR);
   }
 
-  function isUiNoise(el) {
-    const text = (el.innerText || "").trim();
-    if (!text) return true;
-    if (text.length < 48 && /gemini can make mistakes/i.test(text)) return true;
-    return false;
-  }
-
   function getRole(messageEl) {
     const tag = messageEl.tagName.toLowerCase();
     if (tag === "user-query") return "user";
@@ -77,30 +70,23 @@
   }
 
   function extractMessageText(messageEl) {
-    const tag = messageEl.tagName.toLowerCase();
-
-    if (tag === "user-query") {
+    if (getRole(messageEl) === "user") {
       const content =
         messageEl.querySelector(".query-text, .user-query-content") || messageEl;
-      return (content.innerText || "").trim();
+      return readMessageText(content, THOUGHTS_ANCESTOR);
     }
 
-    if (tag === "model-response") {
+    if (getRole(messageEl) === "assistant") {
       const content =
         queryOutsideThoughts(messageEl, "message-content") ||
         queryOutsideThoughts(messageEl, ".model-response-text") ||
         queryOutsideThoughts(messageEl, ".response-content") ||
         queryOutsideThoughts(messageEl, ".markdown-main-panel") ||
         queryOutsideThoughts(messageEl, ".markdown");
-      if (content) return (content.innerText || "").trim();
+      if (content) return readMessageText(content, THOUGHTS_ANCESTOR);
     }
 
-    const generic =
-      queryOutsideThoughts(messageEl, "message-content") ||
-      messageEl.querySelector(".query-text, .model-response-text, .response-content");
-    if (generic) return (generic.innerText || "").trim();
-
-    return (messageEl.innerText || "").trim();
+    return readMessageText(messageEl, THOUGHTS_ANCESTOR);
   }
 
   function collectMessageNodes(root) {
@@ -130,8 +116,8 @@
     const seen = new Set();
     const unique = [];
 
-    for (const el of collectMessageNodes(root)) {
-      if (isThoughtsOnly(el) || isUiNoise(el)) continue;
+    for (const el of canonicalMessageNodes(collectMessageNodes(root))) {
+      if (isThoughtsOnly(el) || !extractMessageText(el)) continue;
       const key = el.getAttribute("data-message-id") || el;
       if (seen.has(key)) continue;
       seen.add(key);
@@ -143,44 +129,10 @@
 
   function getMessageElement(selection) {
     try {
-      const el = selectionAnchorElement(selection);
-      if (!el) return null;
-      if (isThoughtsOnly(el)) return null;
-
-      const selectors = [
-        ...ASSISTANT_MESSAGE_SELECTORS,
-        ...USER_MESSAGE_SELECTORS,
-        "message-content",
-        ".model-response-text",
-        ".query-text",
-        "ms-chat-turn",
-        ".chat-turn-container"
-      ].join(", ");
-
-      const matched = el.closest(selectors);
-      if (!matched) return null;
-
-      const tag = matched.tagName.toLowerCase();
-      if (tag === "user-query" || tag === "model-response") return matched;
-
-      const user = matched.closest(
-        'user-query, .user-query, [data-message-author="user"], .conversation-turn-user'
-      );
-      if (user) return user;
-
-      const assistant = matched.closest(
-        'model-response, .model-response, [data-message-author="assistant"], .conversation-turn-model'
-      );
-      if (assistant) return assistant;
-
-      if (tag === "ms-chat-turn" || matched.classList.contains("chat-turn-container")) {
-        return (
-          matched.querySelector("model-response, .model-response") ||
-          matched.querySelector('user-query, .user-query, [data-message-author="user"]')
-        );
-      }
-
-      return matched;
+      const message = findSelectedMessage(selection, getAllMessages());
+      const node = selection?.anchorNode;
+      const el = node?.nodeType === Node.TEXT_NODE ? node.parentElement : node;
+      return el && !isThoughtsOnly(el) ? message : null;
     } catch (e) {
       return null;
     }
@@ -203,7 +155,7 @@
       if (endIdx === -1) {
         endIdx = all.findIndex((el) => el.contains(messageEl));
       }
-      if (endIdx === -1) endIdx = all.length;
+      if (endIdx === -1) return [];
 
       return all
         .slice(Math.max(0, endIdx - maxMessages), endIdx)
@@ -218,6 +170,7 @@
   }
 
   function shouldIgnoreElement(el) {
+    if (window.CGIAAdapterShared.shouldIgnoreElement(el)) return true;
     if (el.closest(".ql-editor")) return true;
     if (el.closest("rich-textarea")) return true;
     if (el.closest('[class*="input-area"], [class*="input-container"]')) return true;

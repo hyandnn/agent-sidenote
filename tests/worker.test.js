@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
-const { load, event, storageMock } = require('./helpers');
+const { load, event, storageMock, permissionsMock } = require('./helpers');
 
 function worker() {
   const mock = storageMock();
@@ -11,6 +11,8 @@ function worker() {
   mock.chrome.storage.local.get = (value, callback) => callback ? get(value, callback) : new Promise((resolve, reject) => get(value, (data) => mock.chrome.runtime.lastError ? reject(new Error(mock.chrome.runtime.lastError.message)) : resolve(data)));
   mock.chrome.runtime.onConnect = event();
   mock.chrome.runtime.onMessage = event();
+  mock.chrome.runtime.onInstalled = event();
+  permissionsMock(mock.chrome);
   mock.chrome.downloads = { onChanged: event() };
   const context = load([], { chrome: mock.chrome, URL: {}, btoa });
   context.importScripts = (...files) => {
