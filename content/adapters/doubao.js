@@ -1,20 +1,12 @@
 (function () {
-  const { truncateAroundSelection, truncateSimple, sortByDocumentOrder, selectionAnchorElement } =
+  const { truncateAroundSelection, truncateSimple, sortByDocumentOrder, readMessageText, canonicalMessageNodes, findSelectedMessage } =
     window.CGIAAdapterShared;
 
-  const UI_NOISE_SNIPPETS = [
-    "内容由豆包 AI 生成，请仔细甄别",
-    "请仔细甄别",
-    "下载电脑版",
-    "复制",
-    "分享"
-  ];
-
   const MESSAGE_LIST_SELECTORS = [
-    '[data-table-spillover="true"][data-table-spillover-force-disable="true"]',
     '[data-testid="message-list"]',
     '[class*="message-list"]',
     '[class*="chat-scroll"]',
+    '[data-table-spillover="true"][data-table-spillover-force-disable="true"]',
     ".scroll-view-OEiNXD",
     "main"
   ];
@@ -45,18 +37,9 @@
     return document.body;
   }
 
-  function isUiNoise(el) {
-    const text = (el.innerText || "").trim();
-    if (!text) return true;
-    if (text.length < 24 && UI_NOISE_SNIPPETS.some((s) => text.includes(s))) return true;
-    return UI_NOISE_SNIPPETS.some(
-      (snippet) => text === snippet || (text.length < 40 && text.includes(snippet))
-    );
-  }
-
   function getRole(messageEl) {
     if (messageEl.classList.contains("justify-end")) return "user";
-    if (messageEl.matches('[class*="bg-g-send-msg-bubble"], [class*="send-msg-bubble"]')) {
+    if (messageEl.matches(USER_BUBBLE_SELECTORS.join(", "))) {
       return "user";
     }
     if (messageEl.matches('[class*="bg-g-receive-msg-bubble"], [class*="receive-msg-bubble"]')) {
@@ -64,6 +47,7 @@
     }
     const author = messageEl.getAttribute("data-message-author");
     if (author === "user" || author === "assistant") return author;
+    if (messageEl.querySelector(USER_BUBBLE_SELECTORS.join(", "))) return "user";
     if (messageEl.hasAttribute("data-message-id")) {
       return messageEl.classList.contains("justify-end") ? "user" : "assistant";
     }
@@ -73,12 +57,12 @@
 
   function extractMessageText(messageEl) {
     const markdown = messageEl.querySelector(".flow-markdown-body, [class*='markdown-body']");
-    if (markdown) return markdown.innerText || "";
+    if (markdown) return readMessageText(markdown);
     const userText = messageEl.querySelector(
       ".whitespace-pre-wrap.wrap-anywhere:not(.gh-user-query-markdown), [class*='user-query']"
     );
-    if (userText) return userText.innerText || "";
-    return messageEl.innerText || "";
+    if (userText) return readMessageText(userText);
+    return readMessageText(messageEl, '[class*="message-actions"], [data-testid="message-actions"], [class*="message-disclaimer"]');
   }
 
   function collectBubbleNodes(root) {
@@ -91,11 +75,7 @@
 
   function getAllMessages() {
     const root = getMessageListRoot();
-    let nodes = Array.from(root.querySelectorAll("[data-message-id]"));
-
-    if (nodes.length === 0) {
-      nodes = collectBubbleNodes(root);
-    }
+    let nodes = [...root.querySelectorAll("[data-message-id]"), ...collectBubbleNodes(root)];
 
     if (nodes.length === 0) {
       nodes = Array.from(root.querySelectorAll(".flow-markdown-body"))
@@ -106,11 +86,11 @@
     const seen = new Set();
     const unique = [];
 
-    for (const el of nodes) {
+    for (const el of canonicalMessageNodes(nodes)) {
       const key = el.getAttribute("data-message-id") || el;
       if (seen.has(key)) continue;
       seen.add(key);
-      if (isUiNoise(el)) continue;
+      if (!extractMessageText(el)) continue;
       unique.push(el);
     }
 
@@ -119,26 +99,7 @@
 
   function getMessageElement(selection) {
     try {
-      const el = selectionAnchorElement(selection);
-      if (!el) return null;
-
-      const fromMarkdown = el.closest(".flow-markdown-body, [class*='markdown-body']");
-      if (fromMarkdown) {
-        return (
-          fromMarkdown.closest("[data-message-id]") ||
-          fromMarkdown.closest('[class*="receive-msg-bubble"]') ||
-          fromMarkdown.closest('[class*="send-msg-bubble"]') ||
-          fromMarkdown.parentElement
-        );
-      }
-
-      return (
-        el.closest("[data-message-id]") ||
-        el.closest('[class*="bg-g-receive-msg-bubble"]') ||
-        el.closest('[class*="receive-msg-bubble"]') ||
-        el.closest('[class*="bg-g-send-msg-bubble"]') ||
-        el.closest('[class*="send-msg-bubble"]')
-      );
+      return findSelectedMessage(selection, getAllMessages());
     } catch (e) {
       return null;
     }
@@ -158,7 +119,8 @@
       if (all.length === 0) return [];
 
       let endIdx = messageEl ? all.indexOf(messageEl) : all.length;
-      if (endIdx === -1) endIdx = all.length;
+      if (endIdx === -1) endIdx = all.findIndex((el) => el.contains(messageEl));
+      if (endIdx === -1) return [];
 
       return all
         .slice(Math.max(0, endIdx - maxMessages), endIdx)
@@ -173,6 +135,7 @@
   }
 
   function shouldIgnoreElement(el) {
+    if (window.CGIAAdapterShared.shouldIgnoreElement(el)) return true;
     if (el.closest("#flow_chat_sidebar")) return true;
     if (el.closest('[data-testid="chat_input"]')) return true;
     if (el.closest('[class*="chat-input"]')) return true;
@@ -195,7 +158,7 @@
       const el = document.querySelector(sel);
       if (!el) continue;
       const titleEl = el.querySelector('[class*="title"], [class*="overallTitle"]');
-      const text = (titleEl || el).innerText.trim();
+      const text = ((titleEl || el).innerText || (titleEl || el).textContent || "").trim();
       if (text && text !== "豆包") return text;
     }
 

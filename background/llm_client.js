@@ -1,9 +1,5 @@
 function getChatCompletionsUrl(baseUrl) {
-  const base = (baseUrl || "https://api.openai.com").trim().replace(/\/+$/, "");
-  const parsed = new URL(base);
-  if (!["https:", "http:"].includes(parsed.protocol)) throw new Error("API 地址必须使用 HTTP 或 HTTPS。");
-  if (base.endsWith("/chat/completions")) return base;
-  return base.endsWith("/v1") ? `${base}/chat/completions` : `${base}/v1/chat/completions`;
+  return CGIAApiPermissions.getEndpoint(baseUrl).url;
 }
 
 function extractErrorMessage(bodyText) {
@@ -28,7 +24,15 @@ async function askModel(prompt, settings) {
 async function askModelStream(prompt, settings, onChunk, signal) {
   const apiKey = (settings.apiKey || "").trim();
   if (!apiKey) throw new Error("请先在扩展设置中填写 API Key。");
+  const endpoint = await CGIAApiPermissions.requireAccess(settings.apiBaseUrl);
   const controller = new AbortController();
+  let permissionRevoked = false;
+  const onPermissionRemoved = () => {
+    CGIAApiPermissions.hasAccess(settings.apiBaseUrl).then((granted) => {
+      if (!granted) { permissionRevoked = true; controller.abort(); }
+    }).catch(() => { permissionRevoked = true; controller.abort(); });
+  };
+  chrome.permissions.onRemoved.addListener(onPermissionRemoved);
   const abort = () => controller.abort();
   signal?.addEventListener("abort", abort, { once: true });
   if (signal?.aborted) controller.abort();
@@ -70,10 +74,11 @@ async function askModelStream(prompt, settings, onChunk, signal) {
   }
 
   try {
-    const response = await fetch(getChatCompletionsUrl(settings.apiBaseUrl), {
+    const response = await fetch(endpoint.url, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
       body: JSON.stringify(buildRequestBody((settings.apiModel || "deepseek-chat").trim(), prompt, true)),
+      redirect: "error",
       signal: controller.signal
     });
     if (!response.ok) throw new Error(`模型 API 返回 ${response.status}：${extractErrorMessage(await response.text())}`);
@@ -100,14 +105,17 @@ async function askModelStream(prompt, settings, onChunk, signal) {
     if (!completed && finishReason !== "stop") throw new Error("回答流提前结束，已保留部分内容。");
     return full;
   } catch (original) {
-    const error = original.name === "AbortError"
+    const error = permissionRevoked
+      ? new Error("API 授权已撤销，请在扩展设置中重新授权。已收到的回答会保留。")
+      : original.name === "AbortError"
       ? new Error(timedOut ? "请求超时，已保留已收到的内容。" : "请求已停止。")
       : original;
-    error.code = signal?.aborted ? "CANCELLED" : "REQUEST_FAILED";
+    error.code = permissionRevoked ? "API_PERMISSION_REQUIRED" : signal?.aborted ? "CANCELLED" : error.code || "REQUEST_FAILED";
     error.partialAnswer = full;
     throw error;
   } finally {
     clearTimeout(timeoutId);
+    chrome.permissions.onRemoved.removeListener(onPermissionRemoved);
     signal?.removeEventListener("abort", abort);
     if (reader) {
       try { await reader.cancel(); } catch { /* The stream may already be closed. */ }

@@ -66,7 +66,7 @@
         paragraph = paragraph.parentElement;
       }
 
-      const fullText = (paragraph || container).innerText || "";
+      const fullText = window.CGIAAdapterShared.readMessageText(paragraph || container);
       return truncateAroundSelection(
         fullText,
         selection.toString().trim(),
@@ -115,10 +115,17 @@
       return;
     }
 
+    const messageEl = adapter.getMessageElement(selection);
+    const focusNode = selection.focusNode;
+    const focusEl = focusNode?.nodeType === Node.TEXT_NODE ? focusNode.parentElement : focusNode;
+    if (!messageEl || (focusEl && adapter.shouldIgnoreElement?.(focusEl))) {
+      hideSelectionButton();
+      return;
+    }
+
     const range = selection.getRangeAt(0);
     const rect = range.getBoundingClientRect();
 
-    const messageEl = adapter.getMessageElement(selection);
     const mainConversation = settings.includeMainConversation
       ? adapter.getMainConversation(
           messageEl,

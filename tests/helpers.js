@@ -45,4 +45,37 @@ function note(id = 'note_1791100000000_aaaa') {
   return { noteId: id, pageUrl: 'https://chatgpt.com/c/example', siteId: 'chatgpt', selectedText: 'selected quote', mainTopic: 'Stereo', mainQuestion: 'main question', noteType: 'general', tags: ['stereo'], marks: [], status: 'visible', position: { x: 20, y: 20 }, messages: [{ role: 'user', content: 'question', status: 'completed', createdAt: '2026-10-04T16:23:00Z' }, { role: 'assistant', content: 'answer', status: 'completed' }], createdAt: '2026-10-04T16:23:00Z', updatedAt: '2026-10-04T16:23:00Z' };
 }
 
-module.exports = { load, event, storageMock, note };
+function permissionsMock(chrome, initial = []) {
+  const origins = new Set(initial);
+  const calls = [];
+  let grant = true, failure = '', refuseRemoval = false;
+  const contains = (origin) => origins.has(origin) || origins.has('<all_urls>') || origins.has('*://*/*') || origins.has(`${origin.split('://')[0]}://*/*`);
+  chrome.permissions = { onAdded: event(), onRemoved: event() };
+  for (const method of ['request', 'contains', 'getAll', 'remove']) {
+    chrome.permissions[method] = (details, callback) => {
+      if (method === 'getAll') { callback = details; details = undefined; }
+      calls.push({ method, details: details && structuredClone(details) });
+      queueMicrotask(() => {
+        if (failure) {
+          chrome.runtime.lastError = { message: failure }; failure = '';
+          callback(); delete chrome.runtime.lastError; return;
+        }
+        const requested = details?.origins || [];
+        if (method === 'getAll') callback({ origins: [...origins], permissions: [] });
+        else if (method === 'contains') callback(requested.every(contains));
+        else if (method === 'request') {
+          if (grant) for (const origin of requested) origins.add(origin);
+          callback(grant);
+          if (grant) chrome.permissions.onAdded.emit({ origins: requested });
+        } else {
+          const removed = refuseRemoval ? [] : requested.filter((origin) => origins.delete(origin));
+          callback(removed.length > 0);
+          if (removed.length) chrome.permissions.onRemoved.emit({ origins: removed });
+        }
+      });
+    };
+  }
+  return { calls, origins: () => [...origins], deny: () => { grant = false; }, allow: () => { grant = true; }, fail: (message) => { failure = message; }, refuseRemoval: () => { refuseRemoval = true; } };
+}
+
+module.exports = { load, event, storageMock, note, permissionsMock };

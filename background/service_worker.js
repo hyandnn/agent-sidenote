@@ -1,11 +1,16 @@
 importScripts(
   "../shared/note_schema.js",
+  "../shared/api_permissions.js",
   "note_store.js",
   "prompt_builder.js",
   "llm_client.js",
   "stream_mock.js",
   "export_helper.js"
 );
+
+chrome.runtime.onInstalled.addListener(() => {
+  CGIAApiPermissions.removeBroadAccess().catch((error) => console.error("Agent Sidenote permission migration failed:", error.message));
+});
 
 const SETTINGS_KEY = "cgia_standalone_settings";
 

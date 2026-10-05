@@ -1,0 +1,11 @@
+<!doctype html>
+<html><head><title>Stereo basics - Gemini</title></head><body>
+<nav><a aria-current="page">Stereo basics</a><model-response><p id="sidebar">Sidebar preview</p></model-response></nav>
+<main><infinite-scroller>
+  <div class="conversation-container"><user-query><div class="query-text">What is stereo?</div><button>Edit question</button></user-query><model-response class="model-response"><model-thoughts><message-content><p id="thought">Internal reasoning</p></message-content></model-thoughts><message-content><p>Stereo estimates depth from <strong id="quote1">disparity</strong>.</p></message-content><button>Copy answer</button></model-response></div>
+  <div class="conversation-container"><user-query><div class="query-text">How do I handle occlusion?</div></user-query><model-response><message-content><p>Keep an <strong id="quote2">uncertainty estimate</strong>.</p><p aria-hidden="true">Hidden draft</p><pre>confidence = 0.8</pre></message-content><button>Regenerate</button></model-response></div>
+  <model-response hidden>Old branch</model-response>
+</infinite-scroller></main>
+<rich-textarea><div contenteditable="true" id="composer">Draft question</div></rich-textarea>
+<div class="cgia-note"><p id="own-note">Extension note</p></div>
+</body></html>

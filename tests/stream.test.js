@@ -1,15 +1,18 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { load, event } = require('./helpers');
+const { load, event, permissionsMock } = require('./helpers');
 const settings = { apiKey: 'fake', requestTimeoutMs: 1000 };
-function client(text) {
-  return load(['background/llm_client.js'], { fetch: async () => new Response(text) });
+function streamClient(fetch) {
+  const chrome = { runtime: {} };
+  permissionsMock(chrome, ['https://api.openai.com/*']);
+  return load(['shared/api_permissions.js', 'background/llm_client.js'], { chrome, fetch });
 }
+const client = (text) => streamClient(async () => new Response(text));
 const delta = (content, finish_reason = null) => `data: ${JSON.stringify({ choices: [{ delta: { content }, finish_reason }] })}\r\n\r\n`;
 
 test('SSE handles split UTF-8 chunks, CRLF, and final data without newline', async () => {
   const bytes = new TextEncoder().encode(delta('你好') + 'data: [DONE]');
-  const context = load(['background/llm_client.js'], { fetch: async () => new Response(new ReadableStream({ start(controller) { for (let i = 0; i < bytes.length; i++) controller.enqueue(bytes.slice(i, i + 1)); controller.close(); } })) });
+  const context = streamClient(async () => new Response(new ReadableStream({ start(controller) { for (let i = 0; i < bytes.length; i++) controller.enqueue(bytes.slice(i, i + 1)); controller.close(); } })));
   assert.equal(await context.askModelStream('prompt', settings, () => {}), '你好');
 });
 

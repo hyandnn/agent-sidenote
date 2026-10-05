@@ -161,6 +161,8 @@ h1 {
   font-size: 11px;
   line-height: 1.4;
   flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .cgia-tip {

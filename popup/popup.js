@@ -32,9 +32,10 @@ const DEFAULT_SETTINGS = {
 let cachedPageUrl = "";
 
 function detectProviderPreset(settings) {
-  const base = (settings.apiBaseUrl || "").replace(/\/+$/, "");
-  if (base.includes("deepseek.com")) return "deepseek";
-  if (base.includes("openai.com")) return "openai";
+  let hostname;
+  try { hostname = new URL(settings.apiBaseUrl).hostname; } catch { return "custom"; }
+  if (hostname === "api.deepseek.com") return "deepseek";
+  if (hostname === "api.openai.com") return "openai";
   return "custom";
 }
 
@@ -238,73 +239,139 @@ chrome.storage.local.get(SETTINGS_KEY, (result) => {
   if (chrome.runtime.lastError) { showExportError(new Error(chrome.runtime.lastError.message)); return; }
   const settings = { ...DEFAULT_SETTINGS, ...(result[SETTINGS_KEY] || {}) };
   loadForm(settings);
+  refreshApiAccessStatus();
   refreshNoteCount().catch(showExportError);
   bindExportPreviewListeners();
 });
 
-document.getElementById("saveBtn").addEventListener("click", () => {
+let apiActionBusy = false;
+let accessStatusVersion = 0;
+
+function setApiActionBusy(busy) {
+  apiActionBusy = busy;
+  for (const id of ["saveBtn", "testBtn", "revokeApiBtn"]) document.getElementById(id).disabled = busy;
+}
+
+function validateApiSettings(settings) {
+  if (settings.mode !== "api") return;
+  if (!settings.apiKey) throw new Error("API 模式下请填写 API Key。");
+  if (!settings.apiModel) throw new Error("请填写模型名称。");
+  if (!settings.apiBaseUrl) throw new Error("请填写 API 地址。");
+  window.CGIAApiPermissions.getEndpoint(settings.apiBaseUrl);
+}
+
+async function refreshApiAccessStatus() {
+  const version = ++accessStatusVersion;
+  const status = document.getElementById("apiAccessStatus");
+  const revoke = document.getElementById("revokeApiBtn");
+  const baseUrl = document.getElementById("apiBaseUrl").value.trim();
+  try {
+    if (!baseUrl) throw new Error("请填写 API 地址。");
+    const endpoint = window.CGIAApiPermissions.getEndpoint(baseUrl);
+    const granted = await window.CGIAApiPermissions.hasAccess(baseUrl);
+    if (version !== accessStatusVersion) return;
+    status.textContent = `${endpoint.origin}：${granted ? "已授权" : "未授权"}`;
+    revoke.disabled = apiActionBusy || !granted;
+  } catch (error) {
+    if (version !== accessStatusVersion) return;
+    status.textContent = error.message;
+    revoke.disabled = true;
+  }
+}
+
+function storeSettings(settings) {
+  return new Promise((resolve, reject) => {
+    chrome.storage.local.set({ [SETTINGS_KEY]: settings }, () => {
+      if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
+      else resolve();
+    });
+  });
+}
+
+function testConnection(settings) {
+  return new Promise((resolve, reject) => {
+    chrome.runtime.sendMessage({ type: "TEST_CONNECTION", settings }, (response) => {
+      if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
+      else if (response?.error) reject(new Error(response.error));
+      else if (!response?.ok) reject(new Error("测试连接未收到有效响应。"));
+      else resolve(response.message);
+    });
+  });
+}
+
+document.getElementById("saveBtn").addEventListener("click", async () => {
+  if (apiActionBusy) return;
   const msg = document.getElementById("saveMsg");
   try {
     const settings = readForm();
-    if (settings.mode === "api" && !settings.apiKey) {
-      throw new Error("API 模式下请填写 API Key。");
-    }
-    if (settings.mode === "api" && !settings.apiModel) {
-      throw new Error("请填写模型名称。");
-    }
-    if (settings.mode === "api" && !settings.apiBaseUrl) {
-      throw new Error("请填写 API 地址。");
-    }
-
-    chrome.storage.local.set({ [SETTINGS_KEY]: settings }, () => {
-      if (chrome.runtime.lastError) {
-        setMessage(msg, chrome.runtime.lastError.message, true);
-        return;
-      }
+    validateApiSettings(settings);
+    setApiActionBusy(true);
+    // requestAccess must be the first asynchronous operation in this gesture.
+    if (settings.mode === "api") await window.CGIAApiPermissions.requestAccess(settings.apiBaseUrl);
+    await storeSettings(settings);
+    try {
+      await window.CGIAApiPermissions.retainOnlyApiAccess(settings);
       setMessage(msg, "设置已保存。");
-      setTimeout(() => {
-        msg.textContent = "";
-      }, 2000);
-    });
-  } catch (e) {
-    setMessage(msg, e.message, true);
+    } catch (error) {
+      setMessage(msg, `设置已保存，但旧 API 授权清理失败：${error.message}`, true);
+    }
+  } catch (error) {
+    setMessage(msg, error.message, true);
+  } finally {
+    setApiActionBusy(false);
+    await refreshApiAccessStatus();
   }
 });
 
-document.getElementById("testBtn").addEventListener("click", () => {
-  const testMsg = document.getElementById("testMsg");
-  const testBtn = document.getElementById("testBtn");
-
+document.getElementById("testBtn").addEventListener("click", async () => {
+  if (apiActionBusy) return;
+  const msg = document.getElementById("testMsg");
   try {
     const settings = readForm();
     if (settings.mode === "mock") {
-      setMessage(testMsg, "Mock 模式无需测试。", false);
+      setMessage(msg, "Mock 模式无需测试。");
       return;
     }
-    if (!settings.apiKey) {
-      throw new Error("请先填写 API Key。");
-    }
-
-    testBtn.disabled = true;
-    setMessage(testMsg, "测试中…", false);
-
-    chrome.runtime.sendMessage({ type: "TEST_CONNECTION", settings }, (response) => {
-      testBtn.disabled = false;
-
-      if (chrome.runtime.lastError) {
-        setMessage(testMsg, chrome.runtime.lastError.message, true);
-        return;
-      }
-      if (response?.error) {
-        setMessage(testMsg, response.error, true);
-        return;
-      }
-      setMessage(testMsg, response?.message || "连接成功。", false);
-    });
-  } catch (e) {
-    testBtn.disabled = false;
-    setMessage(testMsg, e.message, true);
+    validateApiSettings(settings);
+    setApiActionBusy(true);
+    const access = window.CGIAApiPermissions.requestAccess(settings.apiBaseUrl);
+    setMessage(msg, "授权并测试中…");
+    await access;
+    setMessage(msg, await testConnection(settings));
+  } catch (error) {
+    setMessage(msg, error.message, true);
+  } finally {
+    setApiActionBusy(false);
+    await refreshApiAccessStatus();
   }
+});
+
+document.getElementById("revokeApiBtn").addEventListener("click", async () => {
+  if (apiActionBusy) return;
+  const msg = document.getElementById("testMsg");
+  try {
+    setApiActionBusy(true);
+    await window.CGIAApiPermissions.revokeAccess(document.getElementById("apiBaseUrl").value.trim());
+    setMessage(msg, "API 授权已撤销；再次使用时请测试连接或保存设置。");
+  } catch (error) {
+    setMessage(msg, error.message, true);
+  } finally {
+    setApiActionBusy(false);
+    await refreshApiAccessStatus();
+  }
+});
+
+for (const id of ["apiBaseUrl", "providerPreset", "mode"]) {
+  document.getElementById(id).addEventListener(id === "apiBaseUrl" ? "input" : "change", () => refreshApiAccessStatus());
+}
+chrome.permissions.onAdded.addListener(() => refreshApiAccessStatus());
+chrome.permissions.onRemoved.addListener(() => refreshApiAccessStatus());
+setApiActionBusy(true);
+window.CGIAApiPermissions.removeBroadAccess().catch((error) => {
+  setMessage(document.getElementById("testMsg"), `旧权限清理失败：${error.message}`, true);
+}).finally(() => {
+  setApiActionBusy(false);
+  refreshApiAccessStatus();
 });
 
 document.getElementById("exportMdBtn").addEventListener("click", async () => {
