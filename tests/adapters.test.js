@@ -92,3 +92,22 @@ test('context truncation handles quotes longer than the budget and a zero budget
   assert.equal(truncate('before selected text after', 'selected text', 0), '');
   assert.equal(truncate('before selected text after', 'selected text', 5), '[前文已截断]\nselec\n[后文已截断]');
 });
+
+for (const fixture of ['gemini', 'gemini-classes']) {
+  test(`${fixture}: thoughts-only streaming turns never enter the transcript`, () => {
+    const { adapter } = adapterPage(fixture, 'https://gemini.google.com/app/fixture');
+    const response = adapter.getAllMessages()[1];
+    response.innerHTML = '<div class="thoughts-container"><div class="model-response-text">Internal reasoning only</div></div>';
+    const messages = adapter.getAllMessages();
+    assert.equal(messages.length, 3);
+    const context = adapter.getMainConversation(messages[2], 6, 800);
+    assert.equal(context.length, 2);
+    assert.ok(Array.from(context).every((message) => message.role === 'user' && !message.content.includes('Internal reasoning')));
+  });
+}
+
+test('inline-hidden message ancestors are excluded even when their content is visible markup', () => {
+  const { adapter } = adapterPage('chatgpt', 'https://chatgpt.com/c/fixture');
+  adapter.getAllMessages()[1].style.display = 'none';
+  assert.equal(adapter.getAllMessages().length, 3);
+});

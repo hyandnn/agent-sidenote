@@ -43,10 +43,15 @@
   const UI_ELEMENTS = 'button, nav, aside, textarea, input, [contenteditable="true"], [hidden], [aria-hidden="true"], script, style, .cgia-note, .cgia-selection-button';
 
   function shouldIgnoreElement(el) {
-    return !!el?.closest(UI_ELEMENTS);
+    if (el?.closest(UI_ELEMENTS)) return true;
+    for (let node = el; node?.nodeType === Node.ELEMENT_NODE; node = node.parentElement) {
+      if (node.style?.display === "none" || node.style?.visibility === "hidden") return true;
+    }
+    return false;
   }
 
   function readMessageText(root, excluded = "") {
+    if (shouldIgnoreElement(root) || (excluded && root?.closest(excluded))) return "";
     const ignored = excluded ? `${UI_ELEMENTS}, ${excluded}` : UI_ELEMENTS;
     const blockTags = new Set(["P", "DIV", "SECTION", "ARTICLE", "LI", "UL", "OL", "PRE", "BLOCKQUOTE", "H1", "H2", "H3", "H4", "TABLE", "TR"]);
     function read(node) {

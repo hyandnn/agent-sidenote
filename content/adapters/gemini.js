@@ -86,11 +86,6 @@
       if (content) return readMessageText(content, THOUGHTS_ANCESTOR);
     }
 
-    const generic =
-      queryOutsideThoughts(messageEl, "message-content") ||
-      messageEl.querySelector(".query-text, .model-response-text, .response-content");
-    if (generic) return readMessageText(generic, THOUGHTS_ANCESTOR);
-
     return readMessageText(messageEl, THOUGHTS_ANCESTOR);
   }
 
